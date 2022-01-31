@@ -1,6 +1,6 @@
 import express, { json } from "express";
-import cors from 'cors';
 import { MongoClient } from "mongodb";
+import cors from 'cors';
 import dayjs from "dayjs";
 import joi from 'joi';
 import dotenv from "dotenv";
@@ -16,13 +16,15 @@ const app = express();
 app.use(cors());
 app.use(json());
 
-const userSchema = joi.object({
-  name: joi.string().required()
-});
+
 
 /* Participants Routes */
 app.post('/participants', async (req, res) => {
   const user = { ...req.body, lastStatus: Date.now() };
+
+  const userSchema = joi.object({
+    name: joi.string().required()
+  });
   const validation = userSchema.validate(req.body, { abortEarly: false });
   if (validation.error) {
     res.status(422).send(validation.error.details.map(error => error.message));
@@ -30,16 +32,12 @@ app.post('/participants', async (req, res) => {
   }
 
   try {
-    /* await db.collection('users').deleteMany({}); */
-    /* await db.collection('messages').deleteMany({}); */
+/*     await db.collection('users').deleteMany({});
+    await db.collection('messages').deleteMany({}); */
 
     const loggedUsers = await db.collection('users').find({}).toArray();
     const loggedUsersCollection = loggedUsers.map(user => user.name);
     const result = loggedUsersCollection.find(loggedUser => loggedUser === user.name);
-
-    console.log("result: ",result);
-    console.log("loggedUsersCollection: ", loggedUsersCollection);
-
     if(result === undefined){
       await db.collection('users').insertOne(user);
 
@@ -48,7 +46,7 @@ app.post('/participants', async (req, res) => {
         to: 'Todos',
         text: 'entra na sala...',
         type: 'status',
-        time: dayjs(user.lastStatus).format('HH:MM:SS')
+        time: dayjs(user.lastStatus).format('HH:mm:ss')
       }
       await db.collection('messages').insertOne(status);
 
@@ -74,28 +72,28 @@ app.get('/participants', async (req, res) => {
 });
 
 
+
 /* Messages Routes */
 app.post('/messages', async (req, res) => {
-  const from = req.header('User');
-  const message = { ...req.body, from };
-  const loggedUsers = await db.collection('users').find({}).toArray();
-
-  const messageSchema = joi.object({
-    to: joi.string().required(),
-    text: joi.string().required(),
-    type: joi.string().valid('message', 'private_message').required(),
-    from: joi.string().valid( ...loggedUsers ).required()
-  });
-  const validation = messageSchema.validate(message, { abortEarly: false });
-  if (validation.error) {
-    res.status(422).send(validation.error.details.map(error => error.message));
-    return;
-  }
-
   try {
-    message.time = dayjs(Date.now()).format('HH:MM:SS')
-    console.log(message);
+    const from = req.header('User');
+    const message = { from, ...req.body };
+    const loggedUsers = await db.collection('users').find({}).toArray();
+    const loggedUsersCollection = loggedUsers.map(user => user.name);
 
+    const messageSchema = joi.object({
+      from: joi.string().valid( ...loggedUsersCollection ).required(),
+      to: joi.string().required(),
+      text: joi.string().required(),
+      type: joi.string().valid('message', 'private_message').required()
+    });
+    const validation = messageSchema.validate(message, { abortEarly: false });
+    if (validation.error) {
+      res.status(422).send(validation.error.details.map(error => error.message));
+      return;
+    }
+
+    message.time = dayjs(Date.now()).format('HH:mm:ss');
     await db.collection('messages').insertOne(message);
     res.sendStatus(201);
   } catch (error) {
@@ -104,6 +102,104 @@ app.post('/messages', async (req, res) => {
   }
 });
 
+app.get('/messages', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit);
+    const currentUser = req.header('User');
+    const messages = await db.collection('messages').find({}).toArray();
+    const filteredMessages = messages.filter((message) => {
+      if (
+        message.type === 'status' || message.type === 'message' || 
+        message.from === currentUser || message.to === currentUser
+      ) {
+        return true;
+      }
+      else {
+        return false;
+      }
+    });
+  
+    let currentMessages;
+    let currentMessagesUser;
+    if(limit === NaN){
+      currentMessages = filteredMessages.length;
+    }else{
+      currentMessages = limit;
+    }
+  
+    currentMessagesUser = filteredMessages.slice(-currentMessages);
+    res.send(currentMessagesUser);
+  } catch (error) {
+    console.log(error);
+    res.sendStatus(500); 
+  }
+});
+
+
+
+/* Status Route */
+app.post('/status', async (req, res) => {
+  const user = req.header('User');
+  if(!user){
+    res.sendStatus(400);
+    return;
+  }
+
+  try {
+    const loggedUser = await db.collection('users').findOne({ name: user });
+    if(!loggedUser){
+      res.sendStatus(404);
+      return;
+    }
+
+    let timestamp = Date.now();
+    await db.collection('users').updateOne(
+      { _id: loggedUser._id  },
+      { $set: { lastStatus: timestamp } }
+    );
+    
+    res.sendStatus(200);
+    return;
+  } catch (error) {
+    console.log(error);
+    res.sendStatus(500);
+    return;
+  }
+});
+
+
+
+/* Away From Keyboard */
+setInterval(async () => {
+  let timestampOut = Date.now() - 10000;
+  try {
+    const usersAFK = await db.collection('users').find({ lastStatus: { $lte: timestampOut } }).toArray();
+    if(usersAFK.length === 0){
+      return;
+    }
+    await db.collection('users').deleteMany({ lastStatus: { $lte: timestampOut } });
+
+    let messagesOut = usersAFK.map(userAFK => {
+      let newFormattedMessage = {
+        from: userAFK.name,
+        to: 'Todos',
+        text: 'sai da sala...',
+        type: 'status',
+        time: dayjs().format('HH:mm:ss')
+      }
+      return newFormattedMessage;
+    })
+
+    await db.collection('messages').insertMany([ ...messagesOut ]);
+  } catch (error) {
+    console.log(error);
+    res.sendStatus(500);
+  }
+}, 15000);
+
+
+
+/* Listen - Running app in http://localhost:5000 */
 app.listen(5000, () => {
   console.log('Running app in http://localhost:5000');
 });
